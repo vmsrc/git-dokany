@@ -1,0 +1,6 @@
+[submodule "ext/dokany"]
+	path = ext/dokany
+	url = https://github.com/dokan-dev/dokany.git
+[submodule "ext/libgit2"]
+	path = ext/libgit2
+	url = https://github.com/libgit2/libgit2.git

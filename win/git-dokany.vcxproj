@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>15.0</VCProjectVersion>
+    <ProjectGuid>{CCD596DF-83B9-4464-9F4C-8F3229AA98EB}</ProjectGuid>
+    <RootNamespace>gitdokany</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.16299.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v141</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v141</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(SolutionDir)\build\debug64\bin</OutDir>
+    <IntDir>$(SolutionDir)\build\debug64\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(SolutionDir)\build\release64\bin\</OutDir>
+    <IntDir>$(SolutionDir)\build\release64\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;_DEBUG;DEBUG;_CRTDBG_MAP_ALLOC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>../src/v_lib;./build/debug64/include;../ext/dokany/dokan_fuse/include;../ext/dokany/sys;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <MinimalRebuild>false</MinimalRebuild>
+      <AdditionalOptions>/FI stdlib.h /FI crtdbg.h %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>comctl32.lib;./build/debug64/lib/git2.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OutputFile>$(SolutionDir)\build\debug64\bin\git-dokany.exe</OutputFile>
+    </Link>
+    <BuildLog>
+      <Path>$(SolutionDir)\build\debug64\$(MSBuildProjectName).log</Path>
+    </BuildLog>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <ConformanceMode>true</ConformanceMode>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;NDEBUG;DllMain=DllMain_Off;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalIncludeDirectories>../src/v_lib;./build/release64/include;../ext/dokany/dokan_fuse/include;../ext/dokany/sys;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <OutputFile>$(SolutionDir)\build\release64\bin\git-dokany.exe</OutputFile>
+      <AdditionalDependencies>comctl32.lib;Winhttp.lib;Crypt32.lib;Rpcrt4.lib;./build/release64/lib/git2.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <BuildLog>
+      <Path>$(SolutionDir)\build\release64\$(MSBuildProjectName).log</Path>
+    </BuildLog>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\dokanfuse.cpp" />
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\fusemain.cpp" />
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\fuse_helpers.c" />
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\fuse_opt.c" />
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\utils.cpp" />
+    <ClCompile Include="..\src\config.c" />
+    <ClCompile Include="..\src\fusedgit.c" />
+    <ClCompile Include="..\src\main.c" />
+    <ClCompile Include="..\src\v_lib\v_abq.c" />
+    <ClCompile Include="..\src\v_lib\v_mem_pool.c" />
+    <ClCompile Include="..\src\v_lib\v_thread.win32.c" />
+    <ClCompile Include="..\src\win\win.c" />
+    <ClCompile Include="..\src\win\win_misc.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\src\config.h" />
+    <ClInclude Include="..\src\fusedgit.h" />
+    <ClInclude Include="..\src\sys.h" />
+    <ClInclude Include="..\src\v_lib\v_abq.h" />
+    <ClInclude Include="..\src\v_lib\v_atomic.h" />
+    <ClInclude Include="..\src\v_lib\v_atomic.msc.h" />
+    <ClInclude Include="..\src\v_lib\v_lib.h" />
+    <ClInclude Include="..\src\v_lib\v_mem_pool.h" />
+    <ClInclude Include="..\src\v_lib\v_misc.h" />
+    <ClInclude Include="..\src\v_lib\v_misc.msc.h" />
+    <ClInclude Include="..\src\v_lib\v_thread.h" />
+    <ClInclude Include="..\src\v_lib\v_thread.win32.h" />
+    <ClInclude Include="..\src\v_lib\v_types.h" />
+    <ClInclude Include="..\src\win\resource.h" />
+    <ClInclude Include="..\src\win\win.h" />
+    <ClInclude Include="..\src\win\win_misc.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\src\win\git-dokany.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="..\src\win\icon.ico" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

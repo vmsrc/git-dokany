@@ -1,0 +1,118 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="src">
+      <UniqueIdentifier>{87358df7-102f-45cd-9292-47e8eca1afce}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\win">
+      <UniqueIdentifier>{962892be-c1a1-486e-a250-339e19637fc0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\v_lib">
+      <UniqueIdentifier>{e52d730c-f4f1-4460-b7fd-55c634189b67}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="dokany">
+      <UniqueIdentifier>{4294abc8-80d8-45e2-9957-7dd782090617}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\config.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\fusedgit.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\main.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\win\win.c">
+      <Filter>src\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\win\win_misc.c">
+      <Filter>src\win</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\v_lib\v_abq.c">
+      <Filter>src\v_lib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\v_lib\v_mem_pool.c">
+      <Filter>src\v_lib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\v_lib\v_thread.win32.c">
+      <Filter>src\v_lib</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\fusemain.cpp">
+      <Filter>dokany</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\fuse_opt.c">
+      <Filter>dokany</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\utils.cpp">
+      <Filter>dokany</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\fuse_helpers.c">
+      <Filter>dokany</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ext\dokany\dokan_fuse\src\dokanfuse.cpp">
+      <Filter>dokany</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\src\config.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\fusedgit.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\sys.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\win\win.h">
+      <Filter>src\win</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\win\win_misc.h">
+      <Filter>src\win</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_abq.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_atomic.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_atomic.msc.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_lib.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_mem_pool.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_misc.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_misc.msc.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_thread.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_thread.win32.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\v_lib\v_types.h">
+      <Filter>src\v_lib</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\win\resource.h">
+      <Filter>src\win</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\src\win\git-dokany.rc">
+      <Filter>src\win</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="..\src\win\icon.ico">
+      <Filter>src\win</Filter>
+    </Image>
+  </ItemGroup>
+</Project>
