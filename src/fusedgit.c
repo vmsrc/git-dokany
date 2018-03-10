@@ -1,6 +1,18 @@
+#ifndef _WIN32
+#define _FILE_OFFSET_BITS 64
+#define FUSE_STAT stat
+#define FUSE_OFF_T off_t
+#include <errno.h>
+#endif
+
+#define FUSE_USE_VERSION 27
+
 #include <stdlib.h>
+#include <limits.h>
+#include <string.h>
 #include <stdio.h>
 #include <malloc.h>
+#include <assert.h>
 
 #include "fuse.h"
 #include "git2.h"
@@ -20,10 +32,15 @@
 
 struct fusedgit {
 	struct fuse_chan *fuseChan;
-	char *fuseMountpt;
+	int fuseArgc;
+	char **fuseArgv;
+	struct fuse *fuse;
+	char *fuseMountPt;
+
 	v_sem_t fuseThrSem;
 	struct v_thread fuseThr;
 	int fuseRes;
+	int fuseDaemon;
 
 	struct v_mempool fileChunksPool;
 	struct v_mempool fsEntryPool, fsUniqEntryPool;
@@ -53,7 +70,7 @@ struct uniqFileEntry {
 	// opened && chunks 
 	// !opened && chunks - cached
 	// !opened && !chunks
-	int opened1;
+	int opened;
 	v_aligned_int_t openCnt;
 	u64 statSz;
 	u64 loadSz;
@@ -134,7 +151,7 @@ static struct fsUniqEntry **searchUniqEntry(struct fsUniqEntry **puniq, const gi
 // on - index of the first different char or strlen
 static int mystrcmp(const char *ss1, const char *ss2, int *on)
 {
-	const uchar *us1=ss1, *us2=ss2;
+	const uchar *us1=(const uchar *)ss1, *us2=(const uchar *)ss2;
 	int n=0;
 	int res=0;
 	while (us1[n] && us2[n]) {
@@ -160,7 +177,7 @@ exit:
 
 static int entryComparator(const void *v1, const void *v2)
 {
-	const struct fsEntry **pe1=v1, **pe2=v2;
+	const struct fsEntry * const *pe1=v1, * const *pe2=v2;
 	const struct fsEntry *e1=*pe1, *e2=*pe2;
 	return strcmp(e1->name, e2->name);
 }
@@ -171,14 +188,13 @@ static void allocUniq(struct fsEntry *fse, const git_oid *oid)
 
 	struct fsUniqEntry **puniq=NULL;
 	struct fsUniqEntry *uniq=NULL;
-	// assert(fse->repo if (fse->repo) {
+	assert(fse->repo);// if (fse->repo) {
 		// not a pure virtual directory - search uniq
 		puniq=searchUniqEntry(&fusedgit->uniq, oid);
 		uniq=*puniq;
 		if (uniq)
 			uniq->refcount++;
 	//}
-	// assert(!fse->repo || fse->oid!=0)
 	if (!uniq) {
 		uniq=v_mempool_alloc(&fusedgit->fsUniqEntryPool);
 		uniq->oid=*oid;
@@ -190,7 +206,7 @@ static void allocUniq(struct fsEntry *fse, const git_oid *oid)
 			file->chunks=NULL;
 			file->numChunks=0;
 			file->next=file->prev=NULL;
-			file->opened1=0;
+			file->opened=0;
 			file->openCnt=0;
 			file->statSz=file->loadSz=SZVAL_UNKNOWN;
 		} else {
@@ -234,17 +250,17 @@ static void loadStat(struct fsEntry *fse)
 {
 	struct fusedgit *fgit=fse->fusedgit;
 	if (fse->virtCnt<0) {
-		// assert(fse->uniq
 		struct uniqFileEntry *file=&fse->uniq->file;
 		if (file->statSz==SZVAL_UNKNOWN) {
 			v_csect_enter(&fgit->csGlob);
 			if (file->statSz==SZVAL_UNKNOWN) {
-				struct uniqFileEntry *file=&fse->uniq->file;
 				file->statSz=0;
 				size_t len;
 				git_otype otype;
-				if (!git_odb_read_header(&len, &otype, fse->odb, &fse->uniq->oid))
+				if (!git_odb_read_header(&len, &otype, fse->odb, &fse->uniq->oid)) {
+					barrier();
 					file->statSz=len;
+				}
 			}
 			v_csect_leave(&fgit->csGlob);
 		}
@@ -254,10 +270,10 @@ static void loadStat(struct fsEntry *fse)
 static void toFuseStat(struct fsEntry *fse, struct FUSE_STAT *stbuf, int zero)
 {
 	if (zero)
-		memset(stbuf, 0, sizeof(stbuf));
-	loadStat(fse);
+		memset(stbuf, 0, sizeof(*stbuf));
 
 	if (fse->virtCnt<0) {
+		loadStat(fse);
 		stbuf->st_mode=S_IFREG | 0444;
 		stbuf->st_nlink=1;
 		stbuf->st_size=fse->uniq->file.statSz;
@@ -339,7 +355,6 @@ static void loadTree(struct fsEntry *fse)
 //       !=NULL - points to the unresolved part in path, e.g. saerching "/1/2/3/path/to/searchfile" in "/1/2/3/path" will return "to/searchfile"
 static const char *resolveDirEntry(struct fsEntry **entry_out, struct fsEntry *fseIn, const char *path)
 {
-	struct fusedgit *fgit=fseIn->fusedgit;
 	struct fsUniqEntry *uniq=fseIn->uniq;
 	if (uniq) {
 		if (uniq->tree.childCnt<0)
@@ -416,27 +431,27 @@ static int fuseReaddir(const char *path, void *buf, fuse_fill_dir_t filler,
 	const char *resolv=resolveRootEntry(&entry, fgit->rootEntry, path);
 	if (!resolv) {
 		if (entry->virtCnt>=0) {
-			res=0;
+
 			struct FUSE_STAT fuseStat;
 			toFuseStat(entry, &fuseStat, 1);
-			if (offset++==0)
-				res=filler(buf, ".", &fuseStat, 0);
-			if (!res && offset++==1)
-				res=filler(buf, "..", &fuseStat, 1); // TODO use parent time?
+			res=filler(buf, ".", &fuseStat, 0);
+			if (!res)
+				res=filler(buf, "..", &fuseStat, 0);
 			loadTree(entry);
 			if (entry->uniq) {
 				struct uniqTreeEntry *tree=&entry->uniq->tree;
 				for (int i=0; !res && i<tree->childCnt; i++) {
 					struct fsEntry *child=tree->childs[i];
 					toFuseStat(child, &fuseStat, 1);
-					res=filler(buf, child->name, &fuseStat, i + 2);
+					res=filler(buf, child->name, &fuseStat, 0);
 				}
 			}
+			toFuseStat(entry, &fuseStat, 1);
 			for (int i=0; !res && i<entry->virtCnt; i++) {
 				struct fsEntry *child=entry->virtChilds[i];
-				// assert child->virtCnt>=0;
+				assert(child->virtCnt>=0);
 				if (child->name[0])
-					res=filler(buf, child->name, &fuseStat, i + 2);
+					res=filler(buf, child->name, &fuseStat, 0);
 			}
 		}
 	}
@@ -455,7 +470,7 @@ static int fuseOpen(const char *path, struct fuse_file_info *fi)
 			res=-EACCES;
 		else {
 			res=0;
-			fi->fh=(uint64_t)entry;
+			fi->fh=(size_t)entry;
 			v_atomic_add(&entry->uniq->file.openCnt, 1);
 		}
 	}
@@ -540,7 +555,7 @@ static int fuseRelease(const char *path, struct fuse_file_info *fi)
 		int closed=0;
 		v_csect_enter(&fgit->csGlob);
 		int count=v_atomic_add(&file->openCnt, -1);
-		if (count==0 && file->opened1) {
+		if (count==0 && file->opened) {
 			struct uniqFileEntry *next=file->next, *prev=file->prev;
 			if (next)
 				next->prev=prev;
@@ -559,7 +574,7 @@ static int fuseRelease(const char *path, struct fuse_file_info *fi)
 			fgit->cacheFirst=file;
 			if (!fgit->cacheLast)
 				fgit->cacheLast=file;
-			file->opened1=0;
+			file->opened=0;
 			closed=1;
 		}
 		v_csect_leave(&fgit->csGlob);
@@ -686,7 +701,7 @@ static void loadFile(struct fsEntry *fileEntry)
 	struct fsUniqEntry *uniq=fileEntry->uniq;
 	struct uniqFileEntry *file=&uniq->file;
 
-	if (file->opened1)
+	if (file->opened)
 		return;
 
 	v_csect_enter(&fgit->csGlob);
@@ -720,11 +735,11 @@ static void loadFile(struct fsEntry *fileEntry)
 		if (fgit->openFirst)
 			fgit->openFirst->prev=file;
 		fgit->openFirst=file;
-		file->opened1=1;
+		file->opened=1;
 	}
 	v_csect_leave(&fgit->csGlob);
 
-	if (file->opened1)
+	if (file->opened)
 		return;
 
 	// not cached - > load
@@ -742,18 +757,36 @@ static void loadFile(struct fsEntry *fileEntry)
 	if (fgit->openFirst)
 		fgit->openFirst->prev=file;
 	fgit->openFirst=file;
-	file->opened1=1;
+	file->opened=1;
 	v_csect_leave(&fgit->csGlob);
 }
 
-static u32 msbitMask1(u32 val)
+#if 0
+static u32 msbitMask(u32 val)
 {
 	u32 mask=0x80000000;
 	while (mask && !(mask&val))
 		mask>>=1;
 	return mask;
 }
+#endif
 
+
+#if defined(_MSC_VER)
+static u32 msbitMask(u32 b)
+{
+	assert(b);
+	u32 ix;
+	_BitScanReverse(&ix, b);
+	return 1<<ix;
+}
+#elif defined(__GNUC__)
+static u32 msbitMask(u32 b)
+{
+	u32 ix=__builtin_clz(b);
+	return 0x80000000>>ix;
+}
+#else
 static u32 msbitMask(u32 v)
 {
 	if(v&0xffff0000)if(v&0xff000000)if(v&0xf0000000)if(v&0xc0000000)if(v&0x80000000)
@@ -774,6 +807,7 @@ static u32 msbitMask(u32 v)
 	else if(v&0xc)if(v&0x8)return 0x8;else return 0x4;
 	else if(v&0x2)return 0x2;else return v;
 }
+#endif
 
 static int readFile(struct fsEntry *fileEntry, size_t offset, size_t size, char *buf)
 {
@@ -827,7 +861,7 @@ static int fuseRead(const char *path, char *buf, size_t size, off_t offset,
 	++path; // skip first '/'
 	fusedgit_t fgit=fuse_get_context()->private_data;
 	const char *resolv=NULL;
-	struct fsEntry *entry=(struct fsEntry *)fi->fh;
+	struct fsEntry *entry=(struct fsEntry *)(size_t)fi->fh;
 	if (!entry)
 		resolv=resolveRootEntry(&entry, fgit->rootEntry, path);
 	if (!resolv && entry->virtCnt<0) {
@@ -848,7 +882,7 @@ static void *fuseInit(struct fuse_conn_info *conn)
 
 static void fuseLoopThread(void *param)
 {
-	fusedgit_t fgit=(fusedgit_t)param;
+	fusedgit_t fgit=param;
 	static const struct fuse_operations fuseOperations = {
 		.getattr = fuseGetattr,
 		.readdir = fuseReaddir,
@@ -859,86 +893,66 @@ static void fuseLoopThread(void *param)
 	};
 	// 	return fuse_main(argc, argv, &fuseOperations, fusedgit);
 	//fusedgit->fuse=fuse_setup(1, &mountpoint, &fuseOperations, sizeof(fuseOperations), &fusedgit->mountpoint, &fusedgit->multithreaded, fusedgit);
-	char *mountptIn=strdup(fgit->fuseMountpt);
-	struct fuse_args args;
-	char *argv[]={ "", mountptIn };
-	args.argc=2;
-	args.argv=argv;
-	args.allocated=0;
+	struct fuse_args args = {
+		.argc=fgit->fuseArgc,
+		.argv=fgit->fuseArgv,
+		.allocated=0
+	};
 	int multithreaded;
 	int foreground;
 	int res;
 
 	struct fuse *fuse=NULL;
 	fgit->fuseChan=NULL;
-	fgit->fuseMountpt=NULL;
-	res=fuse_parse_cmdline(&args, &fgit->fuseMountpt, &multithreaded, &foreground);
+	fgit->fuseMountPt=NULL;
+	res=fuse_parse_cmdline(&args, &fgit->fuseMountPt, &multithreaded, &foreground);
 	if (!res) {
-		fgit->fuseChan=fuse_mount(fgit->fuseMountpt, &args);
+		fgit->fuseChan=fuse_mount(fgit->fuseMountPt, &args);
 		res=(fgit->fuseChan==NULL);
 	}
 	if (!res) {
 		fuse=fuse_new(fgit->fuseChan, &args, &fuseOperations, sizeof(fuseOperations), fgit);
 		res=(fuse==NULL);
 	}
-	free(mountptIn);
-
+	fgit->fuseDaemon=!foreground;
 	if (!res)
-		res=fuse_daemonize(true);//foreground);
-
-	/*if (fuse->conf.setsignals) {
-		res=fuse_set_signal_handlers(fuse_get_session(fuse));
-		if (res == -1)
-			goto err_unmount;
-	}*/
-
+		res=fuse_daemonize(foreground);
+	//fuse_set_signal_handlers(fuse_get_session(fuse));
 	if (!res) {
 		fgit->fuseRes=0;
-		v_sem_post(&fgit->fuseThrSem);
-		// MT loops are only supported on MSVC
+		if (!fgit->fuseDaemon)
+			v_sem_post(&fgit->fuseThrSem);
+		// ??? MT loops are only supported on MSVC - blah blah
+		fgit->fuse=fuse;
 		if (multithreaded)
 			fgit->fuseRes=fuse_loop_mt(fuse);
 		else
 			fgit->fuseRes=fuse_loop(fuse);
-		fuse_teardown(fuse, fgit->fuseMountpt);
 	} else {
 		fgit->fuseRes=1;
-		if (fgit->fuseChan)
-			fuse_unmount(fgit->fuseMountpt, fgit->fuseChan);
-		fgit->fuseChan=NULL;
-		if (fuse)
-			fuse_destroy(fuse);
-		free(fgit->fuseMountpt);
-		fgit->fuseMountpt=NULL;
-		v_sem_post(&fgit->fuseThrSem);
 	}
+	v_sem_post(&fgit->fuseThrSem);
 }
 
-int fusedgit_mount(fusedgit_t fgit, const char *mountpt)
+int fusedgit_mount(fusedgit_t fgit, int argc, char *argv[])
 {
-	fgit->fuseMountpt=(char *)mountpt;
+	fgit->fuseDaemon=0;
+	fgit->fuseArgc=argc;
+	fgit->fuseArgv=argv;
 	v_thread_create(&fgit->fuseThr, fuseLoopThread, fgit);
 	v_sem_wait(&fgit->fuseThrSem);
-	int res=fgit->fuseRes;
-	if (res) {
-		v_thread_join(fgit->fuseThr.join);
-		fgit->fuseChan=NULL;
-		fgit->fuseMountpt=NULL;
-	}
-	return res;
+	return fgit->fuseRes;
 }
 
-int fusedgit_umount(fusedgit_t fusedgit)
+int fusedgit_umount(fusedgit_t fgit)
 {
 	int res=1;
-	if (fusedgit->fuseChan) {
-		/*struct fuse_session *se = fuse_get_session(fusedgit->fuse);
-		struct fuse_chan *ch = se->ch;
-		if (fusedgit->fuse->conf.setsignals)
-			fuse_remove_signal_handlers(se);*/
-		fuse_unmount(fusedgit->fuseMountpt, fusedgit->fuseChan);
-		v_thread_join(fusedgit->fuseThr.join);
-		res=fusedgit->fuseRes;
+	if (fgit->fuseChan) {
+		fuse_unmount(fgit->fuseMountPt, fgit->fuseChan);
+		v_thread_join(fgit->fuseThr.join);
+		res=fgit->fuseRes;
+		fgit->fuseChan=NULL;
+		fgit->fuse=NULL;
 	}
 	return res;
 }
@@ -949,6 +963,11 @@ fusedgit_t fusedgit_create(int threads, unsigned long long cacheSize)
 		threads=4;
 	fusedgit_t fgit=malloc(sizeof(*fgit));
 	v_sem_init(&fgit->fuseThrSem, 0);
+	fgit->fuseChan=NULL;
+	fgit->fuseArgc=0;
+	fgit->fuseArgv=NULL;
+	fgit->fuse=NULL;
+	fgit->fuseDaemon=0;
 	fgit->rootEntry=NULL;
 	fgit->uniq=NULL;
 	v_mempool_init(&fgit->fileChunksPool, sizeof(struct chunk), CHUNKS_IN_BLOCK);
@@ -994,6 +1013,7 @@ static void freeFSEntries(struct fsEntry *fse)
 struct fusedgit_tmp_repo {
 	fusedgit_t fusedgit;
 	git_repository *repo;
+	char *repoPath;
 	git_odb *odb;
 	int entries;
 	struct fusedgit_tmp_repo *next;
@@ -1019,6 +1039,7 @@ void fusedgit_destroy(fusedgit_t fgit)
 	while (repo) {
 		git_odb_free(repo->odb);
 		git_repository_free(repo->repo);
+		free(repo->repoPath);
 		fusedgit_repo_t tmp=repo;
 		repo=repo->next;
 		free(tmp);
@@ -1037,6 +1058,7 @@ fusedgit_repo_t fusedgit_addrepo(fusedgit_t fusedgit, const char *repoPath)
 			tmprepo=malloc(sizeof(*tmprepo));
 			tmprepo->fusedgit=fusedgit;
 			tmprepo->repo=repo;
+			tmprepo->repoPath=strdup(repoPath);
 			tmprepo->odb=odb;
 			tmprepo->entries=0;
 			tmprepo->next=NULL;
@@ -1049,7 +1071,6 @@ fusedgit_repo_t fusedgit_addrepo(fusedgit_t fusedgit, const char *repoPath)
 
 static int parsePath(const char *treeish, const char *inpath, const git_oid *oid, char *outpath, int opathlen)
 {
-	int res=-1;
 	int ii=0, oi=0;
 	int slash=1;
 	char oidstr[GIT_OID_HEXSZ + 1];
@@ -1081,6 +1102,7 @@ static int parsePath(const char *treeish, const char *inpath, const git_oid *oid
 					outpath[oi++]=append[ai];
 				ai++;
 			}
+			append=NULL;
 		}
 		slash=(c=='/');
 		ii++;
@@ -1096,23 +1118,61 @@ static int parsePath(const char *treeish, const char *inpath, const git_oid *oid
 	return 0;
 }
 
-int fusedgit_addtree(fusedgit_repo_t tmprepo, const char *treeish, const char *inpath)
+struct addSubmodParam
+{
+	fusedgit_repo_t repo;
+	const char *outPath;
+	int recurse;
+};
+
+static int addtree_byObj(fusedgit_repo_t tmprepo, git_object *obj, const char *path, int submodules);
+
+static int addSubmodCb(git_submodule *sm, const char *name, void *payload)
+{
+	struct addSubmodParam *p=payload;
+	const char *path=git_submodule_path(sm);
+	const git_oid *oid=git_submodule_head_id(sm);
+	if (path && oid) {
+		size_t repoPathLen=strlen(p->repo->repoPath);
+		size_t len=repoPathLen + strlen(path) + 2;
+		char *subpath=malloc(len);
+		strcpy(subpath, p->repo->repoPath);
+		strcat(subpath, "/");
+		strcat(subpath, path);
+		printf("Adding submodule %s\n", subpath);
+		fusedgit_repo_t subrepo=fusedgit_addrepo(p->repo->fusedgit, subpath);
+
+		if (subrepo) {
+			git_object *obj;
+			if (!git_object_lookup(&obj, subrepo->repo, oid, GIT_OBJ_ANY)) {
+				len=strlen(p->outPath) + strlen(path) + 2;
+				char *outpath=malloc(len);
+				strcpy(outpath, p->outPath);
+				strcat(outpath, "/");
+				strcat(outpath, path);
+				printf("Mapping submodule to %s\n", outpath);
+				if (addtree_byObj(subrepo, obj, outpath, p->recurse ? 2 : 0))
+					printf("Mapping submodule failed\n");
+				free(outpath);
+				git_object_free(obj);
+			}
+			fusedgit_releaserepo(subrepo);
+		} else {
+			printf("Adding submodule failed\n");
+		}
+		free(subpath);
+	}
+	return 0;
+}
+
+static int addtree_byObj(fusedgit_repo_t tmprepo, git_object *obj, const char *path, int submodules)
 {
 	int res=-1;
-	git_object *obj=NULL;
-
-	if (git_revparse_single(&obj, tmprepo->repo, treeish))
-		goto error_exit2;
-
 	git_object  *tObj=NULL;
 	if (git_object_peel(&tObj, obj, GIT_OBJ_TREE))
-		goto error_exit1;
+		goto error_exit_0;
 
 	const git_oid *oid=git_object_id(tObj);
-
-	char path[1000];
-	if (parsePath(treeish, inpath, oid, path, 900))
-		goto error_exit;
 
 	fusedgit_t fgit=tmprepo->fusedgit;
 
@@ -1122,14 +1182,14 @@ int fusedgit_addtree(fusedgit_repo_t tmprepo, const char *treeish, const char *i
 		resolv=resolveDirEntry(&baseDir, fgit->rootEntry, path);
 		if (!resolv) {
 			if (baseDir->virtCnt<0) {
-				printf("Cannot mount - path is file: %s\n", inpath);
+				printf("Cannot mount - path is file: %s\n", path);
 				res=-1;
-				goto error_exit;
+				goto error_exit_free;
 			}
 			if ( baseDir->uniq) {
-				printf("Cannot mount - path already mounted: %s\n", inpath);
+				printf("Cannot mount - path already mounted: %s\n", path);
 				res=-1;
-				goto error_exit;
+				goto error_exit_free;
 			}
 			// assert (!baseDir->repo
 			baseDir->repo=tmprepo->repo;
@@ -1139,12 +1199,12 @@ int fusedgit_addtree(fusedgit_repo_t tmprepo, const char *treeish, const char *i
 			goto normal_exit;
 		}
 	}
-
-	char *nextDir=(char *)resolv;
+	char *wrResolv=strdup(resolv);
+	char *nextDir=wrResolv;
 	char *slash;
 	struct fsEntry *firstNewEntry=NULL;
 	struct fsEntry *prevEntry=NULL;
-	while (slash=strchr(nextDir, '/')) {
+	while ((slash=strchr(nextDir, '/'))) {
 		*slash='\0';
 		struct fsEntry *virt=allocFsEntry(nextDir, fgit, NULL, NULL, NULL, 0);
 		virt->virtCnt=1;
@@ -1176,15 +1236,38 @@ int fusedgit_addtree(fusedgit_repo_t tmprepo, const char *treeish, const char *i
 		baseDir->virtChilds=realloc(baseDir->virtChilds, sizeof(struct fsEntry *) * baseDir->virtCnt);
 		baseDir->virtChilds[baseDir->virtCnt - 1]=firstNewEntry;
 	}
+	free(wrResolv);
+	if (submodules) {
+		struct addSubmodParam p = {
+			.repo=tmprepo,
+			.recurse=(submodules==2),
+			.outPath=path
+		};
+		git_submodule_foreach(tmprepo->repo, addSubmodCb, &p);
+	}
 
 normal_exit:
 	res=0;
 
-error_exit:
+error_exit_free:
 	git_object_free(tObj);
-error_exit1:
-	git_object_free(obj);
-error_exit2:
+error_exit_0:
+	return res;
+}
+
+int fusedgit_addtree(fusedgit_repo_t tmprepo, const char *treeish, const char *inpath, int submodules)
+{
+	int res=-1;
+	git_object *obj=NULL;
+
+	if (!git_revparse_single(&obj, tmprepo->repo, treeish)) {
+		const git_oid *oid=git_object_id(obj);
+		char path[1000];
+		if (!parsePath(treeish, inpath, oid, path, 900))
+			res=addtree_byObj(tmprepo, obj, path, submodules);
+		git_object_free(obj);
+	}
+
 	return res;
 }
 
@@ -1194,6 +1277,7 @@ void fusedgit_releaserepo(fusedgit_repo_t tmprepo)
 		if (!tmprepo->entries) {
 			git_odb_free(tmprepo->odb);
 			git_repository_free(tmprepo->repo);
+			free(tmprepo->repoPath);
 			free(tmprepo);
 		} else {
 			struct fusedgit *fgit=tmprepo->fusedgit;

@@ -12,6 +12,7 @@ struct wmiscSysTrayIcon *wmiscSysTrayAdd(HWND hWnd, UINT msg);
 void wmiscSysTrayDel(struct wmiscSysTrayIcon *icon);
 
 void wmiscLVSetColumns(HWND hlv, ...);
+void wmiscLVSetColumnWidths(HWND hlv, ...);
 void wmiscLVAddRow(HWND hlv, const char *item, ...);
 int wmiscLVGetRow(HWND hlv, int row, int maxlen, ...);
 

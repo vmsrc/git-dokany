@@ -245,6 +245,7 @@ static WORD bnMap, bnUnmap;
 static WORD edCache;
 static WORD edTreeish, edPath;
 static WORD bnAdd;
+static WORD cbSubmodules;
 static WORD edBrowseRepo, bnBrowseRepo;
 static WORD lvList;
 static DWORD logicalDrives;
@@ -280,36 +281,66 @@ static void trimws(char *str)
 	}
 }
 
-static void addRepoIfUniq(void)
+static int getRepoFromUI(int i, char *repo, char *mapto, char *treeish, int *subm)
 {
-	char nrepo[512];
-	GetWindowTextA(GetDlgItem(hDlg, edBrowseRepo), nrepo, 512);
-	char ntreeish[512];
-	GetWindowTextA(GetDlgItem(hDlg, edTreeish), ntreeish, 512);
-	char npath[512];
-	GetWindowTextA(GetDlgItem(hDlg, edPath), npath, 512);
-	trimws(nrepo);
-	trimws(ntreeish);
-	trimws(npath);
+	*subm=0;
+	if (i>=0) {
+		HWND hlv=GetDlgItem(hDlg, lvList);
+		char submstr[1050];
+		if (wmiscLVGetRow(hlv, i, 1024, treeish, mapto, repo, submstr, NULL))
+			return -1;
+		if (submstr[0]=='Y')
+			*subm=1;
+		if (submstr[0]=='R')
+			*subm=2;
+	} else {
+		GetWindowTextA(GetDlgItem(hDlg, edBrowseRepo), repo, 1024);
+		GetWindowTextA(GetDlgItem(hDlg, edTreeish), treeish, 1024);
+		GetWindowTextA(GetDlgItem(hDlg, edPath), mapto, 1024);
+		LRESULT submods=SendMessage(GetDlgItem(hDlg, cbSubmodules), CB_GETCURSEL, 0, 0);
+		*subm=(int)submods;
+	}
+	repo[1024]='\0';
+	mapto[1024]='\0';
+	treeish[1024]='\0';
+	trimws(repo);
+	trimws(mapto);
+	trimws(treeish);
+	return 0;
+}
 
+static int checkUniq(const char *repo, const char *mapto, const char *treeish, int submods)
+{
 	HWND hlv=GetDlgItem(hDlg, lvList);
 	for (int i=0; i<10000; i++) {
-		char repo[1050], mapto[1050], treeish[1050];
-		if (wmiscLVGetRow(hlv, i, 1024, &treeish, &mapto, &repo, NULL))
+		char nrepo[1050], nmapto[1050], ntreeish[1050];
+		int nsubm;
+		if (getRepoFromUI(i, nrepo, nmapto, ntreeish, &nsubm))
 			break;
-		repo[1024]='\0';
-		mapto[1024]='\0';
-		treeish[1024]='\0';
-		if (!strcmp(repo, nrepo) && !strcmp(mapto, npath) && !strcmp(treeish, ntreeish))
-			return;
+		if (!strcmp(repo, nrepo) && !strcmp(mapto, nmapto) && !strcmp(treeish, ntreeish) && submods==nsubm)
+			return -1;
 	}
-	wmiscLVAddRow(GetDlgItem(hDlg, lvList), ntreeish, npath, nrepo, NULL);
+	return 0;
+}
+
+static void addRepoIfUniq(void)
+{
+	char repo[1050], mapto[1050], treeish[1050];
+	int submods;
+	getRepoFromUI(-1, repo, mapto, treeish, &submods);
+	if (checkUniq(repo, mapto, treeish, submods))
+		return;
+	char submstr[2]="N";
+	if (submods==1)
+		submstr[0]='Y';
+	if (submods==2)
+		submstr[0]='R';
+	wmiscLVAddRow(GetDlgItem(hDlg, lvList), treeish, mapto, repo, submstr, NULL);
 }
 
 static void applyUIToCfg(void)
 {
 	cfgReset();
-	addRepoIfUniq();
 	HWND hBn=GetDlgItem(hDlg, bnConsole);
 	LRESULT state=SendMessage(hBn, BM_GETSTATE, 0, 0);
 	cfg.gui=(state&BST_CHECKED) ? cfggui_congui : cfggui_guionly;
@@ -320,30 +351,31 @@ static void applyUIToCfg(void)
 	{
 		LRESULT sel=SendMessage(GetDlgItem(hDlg, cbDriveLetter), CB_GETCURSEL, 0, 0);
 		int pos=-1;
-		cfg.drive[0]='z';
+		free(cfg.mountPt);
+		cfg.mountPt=strdup("Y:");
 		for (int i=0; i<26; i++) {
 			if (!(logicalDrives & (1<<i))) {
 				++pos;
 				if (pos==sel) {
-					cfg.drive[0]='A' + i;
+					cfg.mountPt[0]='A' + i;
 					break;
 				}
 			}
 		}
-		cfg.drive[1]=':';
-		cfg.drive[2]='\0';
 	}
 	{
-		HWND hlv=GetDlgItem(hDlg, lvList);
-		for (int i=0; i<10000; i++) {
+		int brk=0;
+		for (int i=0; i<10000 && !brk; i++) {
 			char repo[1050], mapto[1050], treeish[1050];
-			if (wmiscLVGetRow(hlv, i, 1024, &treeish, &mapto, &repo, NULL))
-				break;
-			repo[1024]='\0';
-			mapto[1024]='\0';
-			treeish[1024]='\0';
+			int submods;
+			if (getRepoFromUI(i, repo, mapto, treeish, &submods)) {
+				getRepoFromUI(-1, repo, mapto, treeish, &submods);
+				if (checkUniq(repo, mapto, treeish, submods))
+					break;
+				brk=1;
+			}
 			cfgAddRepo(repo);
-			cfgAddMnt(treeish, mapto);
+			cfgAddMnt(treeish, mapto, submods);
 		}
 	}
 	cfgSane();
@@ -366,13 +398,16 @@ static void applyCfgToUI(void)
 	sprintf(str, "%d", cfg.cacheSizeMB);
 	SetWindowTextA(GetDlgItem(hDlg, edCache), str);
 	{
-		int drive=toUpper(cfg.drive[0]) - 'A';
+		char driveLetter='Y';
+		if (cfg.mountPt)
+			driveLetter=cfg.mountPt[0];
+		int letter=toUpper(driveLetter) - 'A';
 		int i;
 		int pos=-1;
 		for (i=0; i<26; i++) {
 			if (!(logicalDrives & (1<<i))) {
 				++pos;
-				if (i==drive) {
+				if (i==letter) {
 					++pos;
 					break;
 				}
@@ -380,31 +415,39 @@ static void applyCfgToUI(void)
 		}
 		--pos;
 		SendMessage(GetDlgItem(hDlg, cbDriveLetter), CB_SETCURSEL, pos, 0);
-
 	}
 	{
 		cfgEnumReset();
 		const char *validRepo=NULL, *validTreeish=NULL, *validMapto=NULL;
-		const char *repo=NULL;
-		const char *treeish;
-		const char *mapto;
+		int validSubm=0;
 		HWND hlv=GetDlgItem(hDlg, lvList);
 		ListView_DeleteAllItems(hlv);
 		while (1) {
-			cfgEnumNextMount(&repo, &treeish, &mapto);
+			const char *repo;
+			const char *treeish;
+			const char *mapto;
+			int subMods;
+			cfgEnumNextMount(&repo, &treeish, &mapto, &subMods);
 			if (!repo)
 				break;
 			if (treeish && mapto) {
-				wmiscLVAddRow(hlv, treeish, mapto, repo, NULL);
+				char subm[2]="N";
+				if (subMods==1)
+					subm[0]='Y';
+				if (subMods==2)
+					subm[0]='R';
+				wmiscLVAddRow(hlv, treeish, mapto, repo, subm, NULL);
 				validRepo=repo;
 				validTreeish=treeish;
 				validMapto=mapto;
+				validSubm=subMods;
 			}
 		}
 		if (validRepo) {
 			SetWindowTextA(GetDlgItem(hDlg, edBrowseRepo), validRepo);
 			SetWindowTextA(GetDlgItem(hDlg, edTreeish), validTreeish);
 			SetWindowTextA(GetDlgItem(hDlg, edPath), validMapto);
+			SendMessage(GetDlgItem(hDlg, cbSubmodules), CB_SETCURSEL, validSubm, 0);
 		}
 	}
 }
@@ -451,6 +494,11 @@ static INT_PTR CALLBACK dlgProc(HWND hDlgIn, UINT msg, WPARAM wParam, LPARAM lPa
 				++sel;
 			}
 		}
+		hCb=GetDlgItem(hDlg, cbSubmodules);
+		SendMessage(hCb, CB_ADDSTRING, 0, (LPARAM)L"No");
+		SendMessage(hCb, CB_ADDSTRING, 0, (LPARAM)L"Yes");
+		SendMessage(hCb, CB_ADDSTRING, 0, (LPARAM)L"Recursive");
+		SendMessage(hCb, CB_SETCURSEL, 0, 0);
 		createToolTip(hDlg, GetDlgItem(hDlg, bnSave), L"Save current configuration");
 		createToolTip(hDlg, GetDlgItem(hDlg, bnLoad), L"Save configuration from file");
 		createToolTip(hDlg, GetDlgItem(hDlg, bnAppend), L"Append configuration settings from file");
@@ -472,7 +520,8 @@ static INT_PTR CALLBACK dlgProc(HWND hDlgIn, UINT msg, WPARAM wParam, LPARAM lPa
 		EnableWindow(GetDlgItem(hDlg, bnUnmap), FALSE);
 
 		HWND hlv=GetDlgItem(hDlg, lvList);
-		wmiscLVSetColumns(hlv, "tree-ish", "path", "repo", NULL);
+		wmiscLVSetColumns(hlv, "tree-ish", "path", "repo", "submodules", NULL);
+		wmiscLVSetColumnWidths(hlv, 100, 140, 140, LVSCW_AUTOSIZE_USEHEADER);
 		winCfgLock();
 		applyCfgToUI();
 		winCfgUnlock();
@@ -587,7 +636,7 @@ static HWND createDialog(void)
 
 	struct dlgTemplate *t1=newDlgTemplate(
 		WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|DS_SETFONT,
-		0, CW_USEDEFAULT, CW_USEDEFAULT, 320, 223, NULL, NULL, L"GitDrive", 8, L"Tahoma");
+		0, CW_USEDEFAULT, CW_USEDEFAULT, 320, 238, NULL, NULL, L"git-dokany drive", 8, L"Tahoma");
 	int x=6, y=3;
 
 	bnSave=addItem(t1, WS_VISIBLE, 0, x, y, 60, 12, bnclas, L"&Save", NULL);
@@ -595,7 +644,7 @@ static HWND createDialog(void)
 	bnLoad=addItem(t1, WS_VISIBLE, 0, x, y, 60, 12, bnclas, L"&Load", NULL);
 	x+=70;
 	bnAppend=addItem(t1, WS_VISIBLE, 0, x, y, 60, 12, bnclas, L"A&ppend", NULL);
-	x+=124;
+	x+=126;
 	bnConsole=addItem(t1, WS_VISIBLE|BS_AUTOCHECKBOX|BS_LEFTTEXT, 0, x, y, 40, 12, bnclas, L"&Console", NULL);
 
 	x=6;
@@ -610,7 +659,7 @@ static HWND createDialog(void)
 	x+=70;
 	bnUnmap=addItem(t1, WS_VISIBLE|WS_DISABLED, 0, x, y, 60, 12, bnclas, L"&Unmap", NULL);
 
-	x+=70;
+	x+=72;
 	addItem(t1, WS_VISIBLE, 0, x, y+2, 40, 12, stclas, L"cache (MB)", NULL);
 	x+=44;
 	edCache=addItem(t1, WS_VISIBLE|WS_BORDER|ES_RIGHT|ES_NUMBER, 0, x, y, 40, 12, edclas, L"", NULL);
@@ -620,8 +669,8 @@ static HWND createDialog(void)
 
 	addItem(t1, WS_VISIBLE, 0, x, y+2, 30, 12, stclas, L"repo", NULL);
 	x+=44;
-	edBrowseRepo=addItem(t1, WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL, 0, x, y, 190, 12, edclas, L"", NULL);
-	x+=200;
+	edBrowseRepo=addItem(t1, WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL, 0, x, y, 192, 12, edclas, L"", NULL);
+	x+=202;
 	bnBrowseRepo=addItem(t1, WS_VISIBLE, 0, x, y, 60, 12, bnclas, L"&Browse", NULL);
 	x+=80;
 
@@ -630,18 +679,23 @@ static HWND createDialog(void)
 
 	addItem(t1, WS_VISIBLE, 0, x, y+2, 30, 12, stclas, L"tree-ish", NULL);
 	x+=44;
-	edTreeish=addItem(t1, WS_VISIBLE|WS_BORDER, 0, x, y, 190, 12, edclas, L"HEAD", NULL);
+	edTreeish=addItem(t1, WS_VISIBLE|WS_BORDER, 0, x, y, 192, 12, edclas, L"HEAD", NULL);
 	x=6;
 	y+=15;
 	addItem(t1, WS_VISIBLE, 0, x, y+2, 40, 12, stclas, L"path", NULL);
 	x+=44;
-	edPath=addItem(t1, WS_VISIBLE|WS_BORDER, 0, x, y, 190, 12, edclas, L"<treeish>", NULL);
-	x+=200;
+	edPath=addItem(t1, WS_VISIBLE|WS_BORDER, 0, x, y, 192, 12, edclas, L"<treeish>", NULL);
+	x+=202;
 	bnAdd=addItem(t1, WS_VISIBLE, 0, x, y, 60, 12, bnclas, L"&Add", NULL);
+	x=6;
+	y+=15;
+	addItem(t1, WS_VISIBLE, 0, x, y+2, 40, 12, stclas, L"submodules", NULL);
+	x+=44;
+	cbSubmodules=addItem(t1, WS_VISIBLE|CBS_DROPDOWNLIST, 0, x, y, 50, 300, cbclas, L"", NULL);
 
 	x=6;
 	y+=19;
-	lvList=addItem(t1, WS_VISIBLE|WS_BORDER|LVS_REPORT|LVS_NOSORTHEADER, 0, x, y, 306, 130, WC_LISTVIEW, L"", NULL);
+	lvList=addItem(t1, WS_VISIBLE|WS_BORDER|LVS_REPORT|LVS_NOSORTHEADER, 0, x, y, 308, 130, WC_LISTVIEW, L"", NULL);
 
 	x=6;
 	y+=139;

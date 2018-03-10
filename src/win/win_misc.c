@@ -98,7 +98,7 @@ struct wmiscSysTrayIcon *wmiscSysTrayAdd(HWND hWnd, UINT msg)
 	icon->nid.hIcon= hIcon;
 	icon->nid.dwState=NIS_SHAREDICON;
 	icon->nid.dwStateMask=NIS_SHAREDICON;
-	wcscpy(icon->nid.szTip, L"git-dokany");
+	wcscpy(icon->nid.szTip, L"git-dokany drive");
 	icon->nid.uCallbackMessage=msg; 
 	Shell_NotifyIcon(NIM_ADD, &icon->nid);
 	return icon;
@@ -115,13 +115,25 @@ void wmiscLVSetColumns(HWND hlv, ...)
 	va_list ap;
 	va_start(ap, hlv);
 	LVCOLUMNA lvc={0};
-	lvc.mask=LVCF_WIDTH|LVCF_TEXT;
+	lvc.mask=LVCF_TEXT;
 	lvc.iSubItem=0;
 	while (lvc.pszText=va_arg(ap, char *)) {
-		lvc.cx=100;
 		SendMessageA(hlv, LVM_INSERTCOLUMNA, lvc.iSubItem, (LPARAM)&lvc);
 		lvc.iSubItem++;
 	}
+	for (int i=0; i<lvc.iSubItem; i++)
+		SendMessageA(hlv, LVM_SETCOLUMNWIDTH, i, LVSCW_AUTOSIZE_USEHEADER);
+	va_end(ap);
+}
+
+void wmiscLVSetColumnWidths(HWND hlv, ...)
+{
+	va_list ap;
+	va_start(ap, hlv);
+	int width;
+	int subItem=0;
+	while (width=va_arg(ap, int))
+		SendMessageA(hlv, LVM_SETCOLUMNWIDTH, subItem++, width);
 	va_end(ap);
 }
 

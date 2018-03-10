@@ -8,7 +8,8 @@ enum
 struct cfg
 {
 	int cacheSizeMB;
-	char drive[3];
+	char *mountPt;
+	int daemon;
 	int gui;
 };
 
@@ -21,7 +22,7 @@ int cfgLoad(const char *file, int append);
 int cfgParseOpt(const char *opt);
 
 int cfgAddRepo(const char *repo);
-int cfgAddMnt(const char *treeish, const char *mapto);
+int cfgAddMnt(const char *treeish, const char *mapto, int submodules);
 
 void cfgEnumReset(void);
-void cfgEnumNextMount(const char **repo, const char **treeish, const char **mapto);
+void cfgEnumNextMount(const char **repo, const char **treeish, const char **mapto, int *submodules);

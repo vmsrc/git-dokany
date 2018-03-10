@@ -1,0 +1,3 @@
+#!/bin/bash
+MYPATH=$(dirname ${BASH_SOURCE[0]})
+cmake $MYPATH/../ext/libgit2/ -DCMAKE_INSTALL_PREFIX=$MYPATH/build/libgit2 -DBUILD_CLAR=0 -DCMAKE_BUILD_TYPE=Release -DUSE_SSH=0 -DUSE_OPENSSL=0 -DUSE_NSEC=0

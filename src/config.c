@@ -13,6 +13,7 @@ struct cfgMnt
 	char *treeish;
 	char *mapto;
 	struct cfgMnt *next;
+	int submodules;
 };
 
 struct cfgRepo
@@ -24,6 +25,7 @@ struct cfgRepo
 
 static struct cfgRepo *firstRepo, *lastRepo;
 
+static int submodules;
 static char treeish[1024];
 static int mappathValid;
 static char mappath[1024];
@@ -52,10 +54,12 @@ void cfgReset(void)
 	treeish[0]='\0';
 	mappath[0]='\0';
 	mappathValid=0;
+	submodules=0;
+	free(cfg.mountPt);
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.gui=1;
 	cfg.cacheSizeMB=200;
-	strcpy(cfg.drive, "Y");
+	cfg.daemon=0;
 	while (firstRepo) {
 		struct cfgRepo *tmp=firstRepo->next;
 		freeRepo(firstRepo);
@@ -81,28 +85,39 @@ void cfgSane(void)
 		printf("Cache size too small, using 10MB cache\n");
 		cfg.cacheSizeMB=10;
 	}
-	if (toUpper(cfg.drive[0])<'A' || toUpper(cfg.drive[0]>'Z')) {
-		printf("Incorrect drive letter specified, trying 'Z:'\n");
-		cfg.drive[0]='Z';
-		cfg.drive[1]=':';
-		cfg.drive[2]='\0';
+#ifdef _WIN32
+	if (!cfg.mountPt || strlen(cfg.mountPt)!=2) {
+		char *tmp=malloc(3);
+		tmp[0]=cfg.mountPt ? cfg.mountPt[0] : 'Y';
+		tmp[2]='\0';
+		free(cfg.mountPt);
+		cfg.mountPt=tmp;
 	}
-	cfg.drive[1]=':';
-	cfg.drive[2]='\0';
+	cfg.mountPt[0]=toUpper(cfg.mountPt[0]);
+	cfg.mountPt[1]=':';
+	if (cfg.mountPt[0]<'A' || cfg.mountPt[0]>'Z') {
+		printf("Incorrect drive letter specified, trying 'Y:'\n");
+		cfg.mountPt[0]='Y';
+	}
+#else
+	if (!cfg.mountPt || !cfg.mountPt[0])
+		cfg.mountPt=strdup("/mnt");
+#endif
 }
 
 int cfgParseOpt(const char *opt)
 {
 	if (!strncmp(opt, "repo=", 5)) {
 		return cfgAddRepo(opt + 5);
-	} else if (!strncmp(opt, "drive=", 6)) {
-		const char *drive=opt + 6;
-		if (!drive[0] || drive[1] && drive[2] || drive[1] && drive[1]!=':') {
+	} else if (!strncmp(opt, "mount=", 6)) {
+		const char *mountPt=opt + 6;
+#ifdef _WIN32
+		int letter=toUpper(mountPt[0]);
+		if (letter<'A' || letter>'Z' || mountPt[1] && mountPt[2] || mountPt[1] && mountPt[1]!=':')
 			printf("Incorrect drive format. Use L or L:, where L is a drive letter\n");
-		}
-		cfg.drive[0]=drive[0];
-		cfg.drive[1]=':';
-		cfg.drive[2]='\0';
+#endif
+		free(cfg.mountPt);
+		cfg.mountPt=strdup(mountPt);
 		return 0;
 	} else if (!strncmp(opt, "gui=", 4)) {
 		sscanf(opt + 4, "%d", &cfg.gui);
@@ -113,7 +128,7 @@ int cfgParseOpt(const char *opt)
 	} else if (!strncmp(opt, "treeish=", 8)) {
 		strcpy(treeish, opt + 8);
 		if (strlen(treeish) && mappathValid) {
-			int res=cfgAddMnt(treeish, mappath);
+			int res=cfgAddMnt(treeish, mappath, submodules);
 			treeish[0]='\0';
 			mappathValid=0;
 			return res;
@@ -123,7 +138,7 @@ int cfgParseOpt(const char *opt)
 		strcpy(mappath, opt + 5);
 		mappathValid=1;
 		if (strlen(treeish) && mappathValid) {
-			int res=cfgAddMnt(treeish, mappath);
+			int res=cfgAddMnt(treeish, mappath, submodules);
 			treeish[0]='\0';
 			mappathValid=0;
 			return res;
@@ -131,6 +146,17 @@ int cfgParseOpt(const char *opt)
 		return 0;
 	} else if (!strncmp(opt, "cfg=", 4)) {
 		return cfgLoad(opt + 4, 1);
+	} else if (!strncmp(opt, "submodules=", 11)) {
+		const char *subm=opt + 11;
+		submodules=0;
+		if (!strcmp(subm, "y"))
+			submodules=1;
+		else if (!strcmp(subm, "r"))
+			submodules=2;
+		return 0;
+	} else if (!strncmp(opt, "daemonize=", 10)) {
+		sscanf(opt + 10, "%d", &cfg.daemon);
+		return 0;
 	}
 	printf("Unrecognized option '%s'\n", opt);
 	return -1;
@@ -152,7 +178,7 @@ int cfgAddRepo(const char *repo)
 	return 0;
 }
 
-int cfgAddMnt(const char *treeish, const char *mapto)
+int cfgAddMnt(const char *treeish, const char *mapto, int submodules)
 {
 	if (!lastRepo) {
 		printf("No repo specified, not mapping '%s' to '%s'\n", treeish, mapto);
@@ -161,6 +187,7 @@ int cfgAddMnt(const char *treeish, const char *mapto)
 	struct cfgMnt *mnt=malloc(sizeof(*mnt));
 	mnt->treeish=strdup(treeish);
 	mnt->mapto=strdup(mapto);
+	mnt->submodules=submodules;
 	mnt->next=NULL;
 	if (lastRepo->lastMnt)
 		lastRepo->lastMnt->next=mnt;
@@ -179,13 +206,14 @@ void cfgEnumReset(void)
 	currentMnt=NULL;
 }
 
-void cfgEnumNextMount(const char **repo, const char **treeish, const char **mapto)
+void cfgEnumNextMount(const char **repo, const char **treeish, const char **mapto, int *submodules)
 {
 	if (!currentRepo)
 		currentMnt=NULL;
 	*repo=NULL;
 	*treeish=NULL;
 	*mapto=NULL;
+	*submodules=0;
 	if (currentMnt) {
 		currentMnt=currentMnt->next;
 		if (!currentMnt)
@@ -201,27 +229,42 @@ void cfgEnumNextMount(const char **repo, const char **treeish, const char **mapt
 		*repo=currentRepo->repo;
 		*treeish=currentMnt->treeish;
 		*mapto=currentMnt->mapto;
+		*submodules=currentMnt->submodules;
 	}
 }
 
 int cfgSave(const char *file)
 {
+	cfgSane();
 	FILE *f=fopen(file, "wt");
 	if (!f) {
 		printf("Could not save configuration file '%s'\n", file);
 		return -1;
 	}
 	fprintf(f, "gui=%d\n", cfg.gui);
-	fprintf(f, "drive=%c:\n", cfg.drive[0]);
+	fprintf(f, "mount=%s\n", cfg.mountPt);
 	fprintf(f, "cache=%d\n", cfg.cacheSizeMB);
+	fprintf(f, "daemonize=%d\n", cfg.daemon);
 	cfgEnumReset();
-	const char *repo, *prevRepo=NULL;
-	const char *treeish;
-	const char *mapto;
+	const char *prevRepo=NULL;
+	int prevSubmod=0;
 	while (1) {
-		cfgEnumNextMount(&repo, &treeish, &mapto);
+		const char *repo;
+		const char *treeish;
+		const char *mapto;
+		int submodules;
+		cfgEnumNextMount(&repo, &treeish, &mapto, &submodules);
 		if (!repo)
 			break;
+		if (submodules!=prevSubmod) {
+			prevSubmod=submodules;
+			char subc='n';
+			if (submodules==1)
+				subc='y';
+			if (submodules==2)
+				subc='r';
+			fprintf(f, "submodules=%c\n", subc);
+		}
 		if (!prevRepo || strcmp(prevRepo, repo)) {
 			prevRepo=repo;
 			fprintf(f, "repo=%s\n", repo);
@@ -231,7 +274,7 @@ int cfgSave(const char *file)
 			fprintf(f, "path=%s\n", mapto);
 		}
 	}
-	int res=ferror(f) ? 0 : -1;
+	int res=ferror(f) ? -1 : 0;
 	if (res)
 		printf("Error saving configuration file'%s'\n", file);
 	fclose(f);

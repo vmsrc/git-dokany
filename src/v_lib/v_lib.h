@@ -6,7 +6,7 @@
 
 // TODO v_assert, v_check, v_debug ...
 
-#if !defined(WIN32) && !defined(__unix__) && defined(__unix)
+#if !defined(_WIN32) && !defined(__unix__) && defined(__unix)
 #define __unix__
 #endif
 
