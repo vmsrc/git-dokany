@@ -75,6 +75,7 @@ static void mount(int argc, char *argv[])
 		char *fuseArgv[]= {
 			"git-dokany",
 			cfg.mountPt,
+			"-r",
 			"-f"
 		};
 		int fuseArgc=sizeof(fuseArgv)/sizeof(fuseArgv[0]);
