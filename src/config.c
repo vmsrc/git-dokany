@@ -68,12 +68,14 @@ void cfgReset(void)
 	lastRepo=NULL;
 }
 
+#ifdef _WIN32
 static char toUpper(char c)
 {
 	if (c>='a' && c<='z')
 		c-='a' - 'A';
 	return c;
 }
+#endif
 
 void cfgSane(void)
 {
@@ -81,10 +83,8 @@ void cfgSane(void)
 		printf("Unknown GUI option, using gui=2\n");
 		cfg.gui=2;
 	}
-	if (cfg.cacheSizeMB<10) {
-		printf("Cache size too small, using 10MB cache\n");
-		cfg.cacheSizeMB=10;
-	}
+	if (cfg.cacheSizeMB<1)
+		cfg.cacheSizeMB=1;
 #ifdef _WIN32
 	if (!cfg.mountPt || strlen(cfg.mountPt)!=2) {
 		char *tmp=malloc(3);
@@ -107,6 +107,22 @@ void cfgSane(void)
 
 int cfgParseOpt(const char *opt)
 {
+	if (!opt) {
+		// assert(!strlen(treeish) || !mappathValid);
+		if (mappathValid) {
+			int res=cfgAddMnt(treeish, mappath, submodules);
+		}
+		if (strlen(treeish) || mappathValid) {
+			if (!strlen(treeish))
+				strcpy(treeish, "HEAD");
+			int res=cfgAddMnt(treeish, mappath, submodules);
+			mappathValid=0;
+			treeish[0]='\0';
+			mappath[0]='\0';
+			return res;
+		}
+		return 0;
+	}
 	if (!strncmp(opt, "repo=", 5)) {
 		return cfgAddRepo(opt + 5);
 	} else if (!strncmp(opt, "mount=", 6)) {
@@ -130,6 +146,7 @@ int cfgParseOpt(const char *opt)
 		if (strlen(treeish) && mappathValid) {
 			int res=cfgAddMnt(treeish, mappath, submodules);
 			treeish[0]='\0';
+			mappath[0]='\0';
 			mappathValid=0;
 			return res;
 		}
@@ -140,6 +157,7 @@ int cfgParseOpt(const char *opt)
 		if (strlen(treeish) && mappathValid) {
 			int res=cfgAddMnt(treeish, mappath, submodules);
 			treeish[0]='\0';
+			mappath[0]='\0';
 			mappathValid=0;
 			return res;
 		}
@@ -300,6 +318,7 @@ int cfgLoad(const char *file, int append)
 				buf[i]='\0';
 		cfgParseOpt(buf);
 	}
+	cfgParseOpt(NULL);
 	int res=ferror(f) ? -1 : 0;
 	if (res)
 		printf("Error reading configuration file '%s'\n", file);

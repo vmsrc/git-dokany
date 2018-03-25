@@ -32,6 +32,7 @@ make
 cd build
 export LD_LIBRARY_PATH=./libgit2/lib
 ./git-dokany --help
+./git-dokany repo=/home/user/linux.git mount=/mnt/git_mount treeish=HEAD path=kernel_HEAD
 ```
 
 ## Build on Windows

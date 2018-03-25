@@ -25,10 +25,74 @@
 #include "v_atomic.h"
 #include "fusedgit.h"
 
+#if 0
+#ifdef assert
+#undef assert
+#endif
+#define assert(x) ((x) ? 0 : assertFail(__FILE__, __LINE__, #x))
+
+static int assertFail(const char *file, int line, const char *what)
+{
+	printf("file: %s, line: %d, msg: %s", file, line, what);
+	abort();
+	return 0;
+}
+#endif
+
 #define off_t FUSE_OFF_T
 
 #define CHUNKS_IN_BLOCK 500
 #define CHUNK_DATA_SIZE 4000
+
+struct arena_block
+{
+	struct arena_block *next;
+	char data[];
+};
+
+struct arena {
+	size_t dsize; // data size in the block
+	size_t bytes; // number of free bytes in the current block
+	struct arena_block *first, *current;
+};
+
+void arena_init(struct arena *arena, size_t dsize)
+{
+	arena->dsize=dsize;
+	arena->bytes=dsize;
+	arena->first=arena->current=NULL;
+}
+
+void *arena_alloc(struct arena *arena, size_t size)
+{
+	assert(size<=arena->dsize);
+	if (arena->bytes + size<=arena->dsize) {
+		void *res=arena->current->data + arena->bytes;
+		arena->bytes+=size;
+		return res;
+	}
+	struct arena_block *block=malloc(arena->dsize + sizeof(struct arena_block));
+	block->next=NULL;
+	arena->bytes=size;
+	if (arena->current) {
+		arena->current->next=block;
+		arena->current=block;
+	} else {
+		arena->current=arena->first=block;
+	}
+	return block->data;
+}
+
+void arena_destroy(struct arena *arena)
+{
+	int n=0;
+	while (arena->first) {
+		++n;
+		struct arena_block *tmp=arena->first;
+		arena->first=arena->first->next;
+		free(tmp);
+	}
+}
 
 struct fusedgit {
 	struct fuse_chan *fuseChan;
@@ -37,12 +101,15 @@ struct fusedgit {
 	struct fuse *fuse;
 	char *fuseMountPt;
 
+	struct arena arena;
 	v_sem_t fuseThrSem;
 	struct v_thread fuseThr;
 	int fuseRes;
 	int fuseDaemon;
 
+	v_csect_t csFileChunks;
 	struct v_mempool fileChunksPool;
+	v_csect_t csOtherPools;
 	struct v_mempool fsEntryPool, fsUniqEntryPool;
 	struct fsEntry *rootEntry;
 	struct fsUniqEntry *uniq;
@@ -54,23 +121,21 @@ struct fusedgit {
 
 	int threads;
 	v_csect_t csGlob;
-	struct v_abq abqCond;
+	v_cond_t *qConds;
+	struct v_abq abqCondi;
 
 	fusedgit_repo_t firstRepo, lastRepo;
 };
 
 struct chunk {
 	struct chunk *left, *right, *next;
-	struct fsUniqEntry *uniq;
 	char data[CHUNK_DATA_SIZE];
 };
 
 #define SZVAL_UNKNOWN ((size_t)-1)
 struct uniqFileEntry {
-	// opened && chunks 
-	// !opened && chunks - cached
-	// !opened && !chunks
-	int opened;
+	// 0 - closed; 1 - cached; 2 - opened
+	int state;
 	v_aligned_int_t openCnt;
 	u64 statSz;
 	u64 loadSz;
@@ -85,8 +150,7 @@ struct uniqTreeEntry {
 };
 
 struct fsUniqEntry {
-	int hasCond;
-	v_cond_t cond;
+	int condi;
 
 	git_oid oid;
 
@@ -108,7 +172,6 @@ struct fsEntry {
 	int virtCnt; // <0 - file, >=0 - dir + zero or more virtual tree childs
 	struct fsEntry **virtChilds;
 
-	v_csect_t *csect;
 	char *name;
 	struct fsUniqEntry *uniq;
 };
@@ -144,6 +207,19 @@ static struct fsUniqEntry **searchUniqEntry(struct fsUniqEntry **puniq, const gi
 	return prev;
 }
 
+#ifdef _WIN32
+static uchar winToLower(uchar c)
+{
+	if (c>='A' && c<='Z')
+		c+='a' - 'A';
+	return c;
+}
+#define winStrCmp stricmp
+#else
+#define winToLower(x) x
+#define winStrCmp strcmp
+#endif
+
 // returns:
 // -1 - ss1 < ss2
 //  0 - matching strings
@@ -155,11 +231,13 @@ static int mystrcmp(const char *ss1, const char *ss2, int *on)
 	int n=0;
 	int res=0;
 	while (us1[n] && us2[n]) {
-		if (us1[n]<us2[n]) {
+		uchar uc1=winToLower(us1[n]);
+		uchar uc2=winToLower(us2[n]);
+		if (uc1<uc2) {
 			res=-1;
 			goto exit;
 		}
-		if (us1[n]>us2[n]) {
+		if (uc1>uc2) {
 			res=1;
 			goto exit;
 		}
@@ -179,7 +257,7 @@ static int entryComparator(const void *v1, const void *v2)
 {
 	const struct fsEntry * const *pe1=v1, * const *pe2=v2;
 	const struct fsEntry *e1=*pe1, *e2=*pe2;
-	return strcmp(e1->name, e2->name);
+	return winStrCmp(e1->name, e2->name);
 }
 
 static void allocUniq(struct fsEntry *fse, const git_oid *oid)
@@ -199,14 +277,14 @@ static void allocUniq(struct fsEntry *fse, const git_oid *oid)
 		uniq=v_mempool_alloc(&fusedgit->fsUniqEntryPool);
 		uniq->oid=*oid;
 		uniq->left=uniq->right=NULL;
-		uniq->hasCond=0;
+		uniq->condi=-1;
 		uniq->refcount=1;
 		if (fse->virtCnt<0) {
 			struct uniqFileEntry *file=&uniq->file;
 			file->chunks=NULL;
 			file->numChunks=0;
 			file->next=file->prev=NULL;
-			file->opened=0;
+			file->state=0;
 			file->openCnt=0;
 			file->statSz=file->loadSz=SZVAL_UNKNOWN;
 		} else {
@@ -232,8 +310,8 @@ static struct fsEntry *allocFsEntry(
 	
 	struct fsEntry *entry=v_mempool_alloc(&fusedgit->fsEntryPool);
 	if (entry) {
-		entry->csect=NULL;
-		entry->name=strdup(name);
+		entry->name=arena_alloc(&fusedgit->arena, strlen(name) + 1);
+		strcpy(entry->name, name);
 		entry->uniq=NULL;
 		entry->fusedgit=fusedgit;
 		entry->repo=repo;
@@ -296,30 +374,38 @@ static void loadTree(struct fsEntry *fse)
 	if (tree->childCnt>=0)
 		return;
 
+	int condi;
+	v_abq_pop(&fgit->abqCondi, &condi);
 	v_csect_enter(&fgit->csGlob);
-	while (tree->childCnt<0) {
-		if (uniq->hasCond) {
-			v_cond_wait(&uniq->cond, &fgit->csGlob);
-		} else {
-			v_abq_pop(&fgit->abqCond, &uniq->cond);
-			uniq->hasCond=1;
-			break;
-		}
+	if (tree->childCnt>=0) {
+		assert(uniq->condi<0);
+		v_abq_push(&fgit->abqCondi, &condi);
+		v_csect_leave(&fgit->csGlob);
+		return;
 	}
+	if (uniq->condi>=0) {
+		v_abq_push(&fgit->abqCondi, &condi);
+		while (uniq->condi>=0)
+			v_cond_wait(fgit->qConds + uniq->condi, &fgit->csGlob);
+		assert(tree->childCnt>=0);
+		v_csect_leave(&fgit->csGlob);
+		return;
+	}
+	uniq->condi=condi;
 	v_csect_leave(&fgit->csGlob);
 
-	if (tree->childCnt>=0)
-		return;
-
+	assert(tree->childCnt<0);
 	int childCnt=0;
-	git_object *tObj;
-	if (!git_object_lookup(&tObj, fse->repo, &uniq->oid, GIT_OBJ_TREE)) {
+	git_tree *tObj;
+	if (!git_tree_lookup(&tObj, fse->repo, &uniq->oid)) {
 		
 		const git_tree *treeObj=(const git_tree *)tObj;
 		int max_i=(int)git_tree_entrycount(treeObj);
 		const git_tree_entry *te;
 		if (max_i>0 && max_i<1000000) {
-			tree->childs=malloc(sizeof(struct fsEntry *)*max_i);
+			v_csect_enter(&fgit->csOtherPools);
+			tree->childs=arena_alloc(&fgit->arena, sizeof(struct fsEntry *)*max_i);
+			v_csect_leave(&fgit->csOtherPools);
 			if (!tree->childs)
 				abort();
 			for (int i=0; i < max_i; ++i) {
@@ -329,24 +415,29 @@ static void loadTree(struct fsEntry *fse)
 					const git_oid *oid=git_tree_entry_id(te);
 					const char *name=git_tree_entry_name(te);
 					for (int j=0; j<fse->virtCnt; j++) {
-						if (!strcmp(fse->virtChilds[j]->name, name)) {
+						if (!winStrCmp(fse->virtChilds[j]->name, name)) {
 							fse->virtChilds[j]->name[0]='\0';
 							printf("warning - directory overriden: %s\n", name);
 						}
 					}
+					v_csect_enter(&fgit->csOtherPools);
 					tree->childs[childCnt++]=allocFsEntry(name,
 						fgit, fse->repo, fse->odb, oid, (otype==GIT_OBJ_BLOB));
+					v_csect_leave(&fgit->csOtherPools);
 				}
 			}
 			qsort(tree->childs, childCnt, sizeof(tree->childs[0]), entryComparator);
 		}
-		git_object_free(tObj);
+		git_tree_free(tObj);
 	}
+	assert(tree->childCnt<0);
 
 	v_csect_enter(&fgit->csGlob);
-	uniq->hasCond=0;
-	v_cond_broadcast(&uniq->cond);
-	v_abq_push(&fgit->abqCond, &uniq->cond);
+	assert(uniq->condi>=0);
+	v_cond_broadcast(fgit->qConds + uniq->condi);
+	v_abq_push(&fgit->abqCondi, &uniq->condi);
+	uniq->condi=-1;
+	barrier();
 	tree->childCnt=childCnt;
 	v_csect_leave(&fgit->csGlob);
 }
@@ -466,9 +557,9 @@ static int fuseOpen(const char *path, struct fuse_file_info *fi)
 	struct fsEntry *entry;
 	const char *resolv=resolveRootEntry(&entry, fgit->rootEntry, path);
 	if (!resolv && entry->virtCnt<0) {
-		if ((fi->flags & 3) != O_RDONLY)
+		if ((fi->flags & 3) != O_RDONLY) {
 			res=-EACCES;
-		else {
+		} else {
 			res=0;
 			fi->fh=(size_t)entry;
 			v_atomic_add(&entry->uniq->file.openCnt, 1);
@@ -477,6 +568,7 @@ static int fuseOpen(const char *path, struct fuse_file_info *fi)
 	return res;
 }
 
+#if 0
 static void prlist(struct fusedgit *fgit)
 {
 	printf(">Cached: ");
@@ -511,33 +603,42 @@ static void prlist(struct fusedgit *fgit)
 	}
 	printf("\n");
 }
+#endif
 
 static void reduceCache(struct fusedgit *fgit)
 {
 	v_csect_enter(&fgit->csGlob);
 	while (fgit->cacheChunks && fgit->cacheChunks + fgit->openChunks > fgit->maxChunks) {
 		struct uniqFileEntry *cached=fgit->cacheLast;
-		if (cached) {
-			fgit->cacheLast=cached->prev;
-			if (!fgit->cacheLast)
-				fgit->cacheFirst=NULL;
-			else
-				fgit->cacheLast->next=NULL;
-			cached->prev=cached->next=NULL;
-			fgit->cacheChunks-=cached->numChunks;
-			struct chunk *chunk=cached->chunks;
-			cached->chunks=NULL;
-			cached->loadSz=SZVAL_UNKNOWN;
-			cached->numChunks=0;
-			while (chunk) {
-				struct chunk *c=chunk;
-				chunk=chunk->next;
-				v_mempool_freeone(&fgit->fileChunksPool, c);
-			}
-			v_csect_leave(&fgit->csGlob);
-			v_sched_yield();
-			v_csect_enter(&fgit->csGlob);
+		assert(cached);
+		assert(cached->state==1);
+		fgit->cacheLast=cached->prev;
+		if (!fgit->cacheLast) {
+			fgit->cacheFirst=NULL;
+			assert(fgit->cacheChunks==cached->numChunks);
+		} else {
+			fgit->cacheLast->next=NULL;
 		}
+		cached->prev=cached->next=NULL;
+		assert(fgit->cacheChunks>=cached->numChunks);
+		fgit->cacheChunks-=cached->numChunks;
+		struct chunk *chunk=cached->chunks;
+		cached->state=0;
+		cached->chunks=NULL;
+		cached->loadSz=SZVAL_UNKNOWN;
+		cached->numChunks=0;
+
+		v_csect_enter(&fgit->csFileChunks);
+		while (chunk) {
+			struct chunk *c=chunk;
+			chunk=chunk->next;
+			v_mempool_freeone(&fgit->fileChunksPool, c);
+		}
+		v_csect_leave(&fgit->csFileChunks);
+
+		v_csect_leave(&fgit->csGlob);
+		v_sched_yield();
+		v_csect_enter(&fgit->csGlob);
 	}
 	v_csect_leave(&fgit->csGlob);
 }
@@ -555,7 +656,7 @@ static int fuseRelease(const char *path, struct fuse_file_info *fi)
 		int closed=0;
 		v_csect_enter(&fgit->csGlob);
 		int count=v_atomic_add(&file->openCnt, -1);
-		if (count==0 && file->opened) {
+		if (count==0 && file->state==2) {
 			struct uniqFileEntry *next=file->next, *prev=file->prev;
 			if (next)
 				next->prev=prev;
@@ -574,7 +675,7 @@ static int fuseRelease(const char *path, struct fuse_file_info *fi)
 			fgit->cacheFirst=file;
 			if (!fgit->cacheLast)
 				fgit->cacheLast=file;
-			file->opened=0;
+			file->state=1;
 			closed=1;
 		}
 		v_csect_leave(&fgit->csGlob);
@@ -647,22 +748,38 @@ static void loadFileChunks(struct fsEntry *fileEntry)
 
 	reduceCache(fgit);
 
-	struct myGitStrem stream;
-	myGitStreamOpen(&stream, fileEntry->odb, &fileEntry->uniq->oid);
-
 	size_t statLen=file->statSz;
 	u32 numChunks=(u32)((statLen + (CHUNK_DATA_SIZE - 1))/CHUNK_DATA_SIZE);
+	file->numChunks=numChunks;
+	file->loadSz=file->statSz;
+	if (!file->loadSz)
+		return;
 
 	u32 level=1, leveli=0;
 	u32 i;
 	struct chunk *back=NULL, *uplevel=NULL, *levelStart=NULL;
 	size_t loadLen=0;
 	size_t len=CHUNK_DATA_SIZE;
+
+	v_csect_enter(&fgit->csFileChunks);
+	struct chunk *chunk=v_mempool_alloc(&fgit->fileChunksPool);
+	file->chunks=chunk;
+	for (i=1; i<numChunks; i++) {
+		struct chunk *next=v_mempool_alloc(&fgit->fileChunksPool);
+		chunk->next=next;
+		chunk=next;
+	}
+	chunk->next=NULL;
+	v_csect_leave(&fgit->csFileChunks);
+
+	chunk=file->chunks;
+	struct myGitStrem stream;
+	myGitStreamOpen(&stream, fileEntry->odb, &fileEntry->uniq->oid);
+
 	for (i=0; i<numChunks; i++) {
-		struct chunk *chunk=v_mempool_alloc(&fgit->fileChunksPool);
 		if (!levelStart)
 			levelStart=chunk;
-		chunk->left=chunk->right=chunk->next=NULL;
+		chunk->left=chunk->right=NULL;
 		if (back)
 			back->next=chunk;
 		back=chunk;
@@ -689,10 +806,12 @@ static void loadFileChunks(struct fsEntry *fileEntry)
 		if (nrd!=len)
 			break;
 		statLen-=len;
+		chunk=chunk->next;
 	}
-	file->numChunks=numChunks;
 	file->loadSz=loadLen;
 	myGitStreamClose(&stream);
+
+	reduceCache(fgit);
 }
 
 static void loadFile(struct fsEntry *fileEntry)
@@ -701,20 +820,22 @@ static void loadFile(struct fsEntry *fileEntry)
 	struct fsUniqEntry *uniq=fileEntry->uniq;
 	struct uniqFileEntry *file=&uniq->file;
 
-	if (file->opened)
+	if (file->state==2)
 		return;
 
+	assert(file->openCnt>0);
+	int condi;
+	v_abq_pop(&fgit->abqCondi, &condi);
 	v_csect_enter(&fgit->csGlob);
-	while (!file->chunks) {
-		if (uniq->hasCond) {
-			v_cond_wait(&uniq->cond, &fgit->csGlob);
-		} else {
-			v_abq_pop(&fgit->abqCond, &uniq->cond);
-			uniq->hasCond=1;
-			break;
-		}
+	if (file->state==2) {
+		assert(uniq->condi<0);
+		v_abq_push(&fgit->abqCondi, &condi);
+		v_csect_leave(&fgit->csGlob);
+		return;
 	}
-	if (file->chunks) {
+	if (file->state==1) {
+		assert(uniq->condi<0);
+		v_abq_push(&fgit->abqCondi, &condi);
 		struct uniqFileEntry *prev=file->prev, *next=file->next;
 		if (next)
 			next->prev=prev;
@@ -726,6 +847,7 @@ static void loadFile(struct fsEntry *fileEntry)
 			fgit->cacheFirst=next;
 		if (fgit->cacheLast==file)
 			fgit->cacheLast=prev;
+		assert(fgit->cacheChunks>=file->numChunks);
 		fgit->cacheChunks-=file->numChunks;
 		// add to opened list
 		fgit->openChunks+=file->numChunks;
@@ -735,21 +857,32 @@ static void loadFile(struct fsEntry *fileEntry)
 		if (fgit->openFirst)
 			fgit->openFirst->prev=file;
 		fgit->openFirst=file;
-		file->opened=1;
+		barrier();
+		file->state=2;
+		v_csect_leave(&fgit->csGlob);
+		return;
 	}
+	if (uniq->condi>=0) {
+		v_abq_push(&fgit->abqCondi, &condi);
+		while (uniq->condi>=0)
+			v_cond_wait(fgit->qConds + uniq->condi, &fgit->csGlob);
+		assert(file->state==2);
+		v_csect_leave(&fgit->csGlob);
+		return;
+	}
+	uniq->condi=condi;
 	v_csect_leave(&fgit->csGlob);
 
-	if (file->opened)
-		return;
-
-	// not cached - > load
-	if (!file->chunks)
-		loadFileChunks(fileEntry);
+	assert(!file->state);
+	assert(!file->chunks);
+	loadFileChunks(fileEntry);
+	assert(!file->state);
 
 	v_csect_enter(&fgit->csGlob);
-	uniq->hasCond=0;
-	v_cond_broadcast(&uniq->cond);
-	v_abq_push(&fgit->abqCond, &uniq->cond);
+	assert(uniq->condi>=0);
+	v_cond_broadcast(fgit->qConds + uniq->condi);
+	v_abq_push(&fgit->abqCondi, &uniq->condi);
+	uniq->condi=-1;
 	// add to opened list
 	fgit->openChunks+=file->numChunks;
 	file->prev=NULL;
@@ -757,7 +890,8 @@ static void loadFile(struct fsEntry *fileEntry)
 	if (fgit->openFirst)
 		fgit->openFirst->prev=file;
 	fgit->openFirst=file;
-	file->opened=1;
+	barrier();
+	file->state=2;
 	v_csect_leave(&fgit->csGlob);
 }
 
@@ -962,6 +1096,7 @@ fusedgit_t fusedgit_create(int threads, unsigned long long cacheSize)
 	if (threads<1)
 		threads=4;
 	fusedgit_t fgit=malloc(sizeof(*fgit));
+	arena_init(&fgit->arena, 2*1024*1024);
 	v_sem_init(&fgit->fuseThrSem, 0);
 	fgit->fuseChan=NULL;
 	fgit->fuseArgc=0;
@@ -971,8 +1106,8 @@ fusedgit_t fusedgit_create(int threads, unsigned long long cacheSize)
 	fgit->rootEntry=NULL;
 	fgit->uniq=NULL;
 	v_mempool_init(&fgit->fileChunksPool, sizeof(struct chunk), CHUNKS_IN_BLOCK);
-	v_mempool_init(&fgit->fsEntryPool, sizeof(struct fsEntry), 200);
-	v_mempool_init(&fgit->fsUniqEntryPool, sizeof(struct fsUniqEntry), 200);
+	v_mempool_init(&fgit->fsEntryPool, sizeof(struct fsEntry), 1000000/sizeof(struct fsEntry));
+	v_mempool_init(&fgit->fsUniqEntryPool, sizeof(struct fsUniqEntry), 1000000/sizeof(struct fsUniqEntry));
 	fgit->cacheFirst=fgit->cacheLast=fgit->openFirst=NULL;
 	fgit->cacheChunks=fgit->openChunks=0;
 	u64 maxChunks=cacheSize/sizeof(struct chunk);
@@ -980,19 +1115,25 @@ fusedgit_t fusedgit_create(int threads, unsigned long long cacheSize)
 		maxChunks=UINT_MAX;
 	fgit->maxChunks=(u32)maxChunks;
 	v_csect_init(&fgit->csGlob);
+	v_csect_init(&fgit->csFileChunks);
+	v_csect_init(&fgit->csOtherPools);
 	fgit->threads=threads;
-	v_abq_init(&fgit->abqCond, threads, sizeof(v_cond_t), NULL);
+	fgit->qConds=malloc(sizeof(v_cond_t)*threads);
+	v_abq_init(&fgit->abqCondi, threads, sizeof(int), NULL);
 	fgit->firstRepo=fgit->lastRepo=NULL;
 	for (int i=0; i<threads; i++) {
-		v_cond_t cond;
-		v_cond_init(&cond);
-		v_abq_push(&fgit->abqCond, &cond);
+		v_cond_init(fgit->qConds + i);
+		v_abq_push(&fgit->abqCondi, &i);
 	}
 	git_libgit2_init();
-	git_libgit2_opts(GIT_OPT_SET_CACHE_MAX_SIZE, 1000000);
+	//git_libgit2_opts(GIT_OPT_SET_CACHE_MAX_SIZE, (size_t)(1024*1024));
+	git_libgit2_opts(GIT_OPT_ENABLE_CACHING, 0);
+	git_libgit2_opts(GIT_OPT_SET_MWINDOW_SIZE, (size_t)(1024*1024));
+	git_libgit2_opts(GIT_OPT_SET_MWINDOW_MAPPED_LIMIT, (size_t)(32*1024*1024));
 	return fgit;
 }
 
+#if 0
 static void freeFSEntries(struct fsEntry *fse)
 {
 	// assert(!fse->uniq->hasCond)
@@ -1009,6 +1150,7 @@ static void freeFSEntries(struct fsEntry *fse)
 		free(fse->name);
 	}
 }
+#endif
 
 struct fusedgit_tmp_repo {
 	fusedgit_t fusedgit;
@@ -1024,14 +1166,18 @@ void fusedgit_destroy(fusedgit_t fgit)
 	if (!fgit)
 		return;
 	v_sem_destroy(&fgit->fuseThrSem);
-	freeFSEntries(fgit->rootEntry);
+	//freeFSEntries(fgit->rootEntry);
+	arena_destroy(&fgit->arena);
 	for (int i=0; i<fgit->threads; i++) {
-		v_cond_t cond;
-		v_abq_pop(&fgit->abqCond, &cond);
-		v_cond_destroy(&cond);
+		int condi;
+		v_abq_pop(&fgit->abqCondi, &condi);
+		v_cond_destroy(fgit->qConds + i);
 	}
-	v_abq_destroy(&fgit->abqCond);
+	free(fgit->qConds);
+	v_abq_destroy(&fgit->abqCondi);
 	v_csect_destroy(&fgit->csGlob);
+	v_csect_destroy(&fgit->csFileChunks);
+	v_csect_destroy(&fgit->csOtherPools);
 	v_mempool_destroy(&fgit->fsEntryPool);
 	v_mempool_destroy(&fgit->fsUniqEntryPool);
 	v_mempool_destroy(&fgit->fileChunksPool);
@@ -1148,7 +1294,8 @@ static int addSubmodCb(git_submodule *sm, const char *name, void *payload)
 				len=strlen(p->outPath) + strlen(path) + 2;
 				char *outpath=malloc(len);
 				strcpy(outpath, p->outPath);
-				strcat(outpath, "/");
+				if (outpath[0])
+					strcat(outpath, "/");
 				strcat(outpath, path);
 				printf("Mapping submodule to %s\n", outpath);
 				if (addtree_byObj(subrepo, obj, outpath, p->recurse ? 2 : 0))
@@ -1168,11 +1315,11 @@ static int addSubmodCb(git_submodule *sm, const char *name, void *payload)
 static int addtree_byObj(fusedgit_repo_t tmprepo, git_object *obj, const char *path, int submodules)
 {
 	int res=-1;
-	git_object  *tObj=NULL;
-	if (git_object_peel(&tObj, obj, GIT_OBJ_TREE))
+	git_tree  *tObj=NULL;
+	if (git_object_peel((git_object **)&tObj, obj, GIT_OBJ_TREE))
 		goto error_exit_0;
 
-	const git_oid *oid=git_object_id(tObj);
+	const git_oid *oid=git_tree_id(tObj);
 
 	fusedgit_t fgit=tmprepo->fusedgit;
 
@@ -1250,7 +1397,7 @@ normal_exit:
 	res=0;
 
 error_exit_free:
-	git_object_free(tObj);
+	git_tree_free(tObj);
 error_exit_0:
 	return res;
 }
@@ -1280,6 +1427,9 @@ void fusedgit_releaserepo(fusedgit_repo_t tmprepo)
 			free(tmprepo->repoPath);
 			free(tmprepo);
 		} else {
+			git_odb_free(tmprepo->odb);
+			tmprepo->odb=NULL;
+
 			struct fusedgit *fgit=tmprepo->fusedgit;
 			if (fgit->lastRepo) {
 				fgit->lastRepo->next=tmprepo;

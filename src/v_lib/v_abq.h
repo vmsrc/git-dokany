@@ -2,10 +2,11 @@
 #define _V_ABQ_H_
 
 #include "v_thread.h"
+#include "v_atomic.h"
 
 struct v_abq {
-	v_sem_t free, used;
-	v_csect_t push_cs, pop_cs;
+	v_sem_t blockPush, blockPop;
+	v_aligned_int_t toPush, toPop, lockPush, lockPop;
 	char *storage, *push, *pop, *last;
 	int alloc;
 	unsigned elem_sz;

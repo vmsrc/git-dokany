@@ -120,29 +120,28 @@ static void usage(void)
 		"  gitdokany <option> <opton> ...   specify command line options\n"
 #ifdef _WIN32
 		"    mount=L:                       drive to mount to (drive=X: drive=Y)\n"
+		"    repo=C:\\path\\to\\repo           repository location (repo=C:\\repositories\\linux.git)\n"
 #else
-		"    mount=<mount/path>             path to mount to\n"
+		"    mount=/mount/path              path to mount to\n"
+		"    repo=/path/to/repo             repository location (repo=/home/repositories/linux.git)\n"
 #endif
-		"    repo=C:\\path\\to\\repo           repository location (repo=C:\\torvalds\\linux.git)\n"
 		"    treeish=TREEISH                git tree-ish to map (treeish=master treeish=HEAD:samples/fuse_mirror\n"
 		"    path=<map_path>                path to map tree-ish to, relative to mount drive (path=debug\\master)\n"
 		"    submodules=n/y/r               auto map submodules (no, yes, recursive)\n"
+#ifdef _WIN32
 		"    gui=0/1/2                      0 - no gui, 1 - gui (hide console), 2 - gui (show console)\n"
+#endif
 		"    cache=100                      cache size (MB)\n"
 		"    cfg=config_file                parse additional options from specified file, one option per line\n"
 		"    daemonize=0/1                  0 - stay in foreground, 1 - go to background\n"
 		"  The 'path=' option supports <hash> and <treeish> tags:\n"
 		"    path=debug\\<hash>\\<treeish>\n"
 		"\n"
-		"\n"
 	);
 }
 
 int main(int argc, char *argv[])
 {
-#ifdef _WIN32
-	int hasDokan=dokanDllPresent();
-#endif
 	cfgReset();
 	if (argc==2) {
 		if (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h")) {
@@ -161,6 +160,10 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 		}
+		if (cfgParseOpt(NULL)) {
+			usage();
+			return 1;
+		}
 	}
 	cfgSane();
 #ifdef _WIN32
@@ -170,12 +173,6 @@ int main(int argc, char *argv[])
 			printf("Failed to create GUI\n");
 			return 1;
 		}
-	}
-	if (!hasDokan) {
-		printf(
-			"It seems that the DOKANY system driver is not present.\n"
-			"This program requires the DOKANY driver to operate.\n"
-		);
 	}
 	if (cfg.gui) {
 		if (argc==2)

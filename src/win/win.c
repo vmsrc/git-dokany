@@ -8,11 +8,6 @@
 #include "win_misc.h"
 #include "../config.h"
 
-int dokanDllPresent(void)
-{
-	return NULL!=LoadLibrary(L"dokan1.dll");
-}
-
 static int created;
 static CRITICAL_SECTION csCfg;
 
@@ -458,10 +453,12 @@ static INT_PTR CALLBACK dlgProc(HWND hDlgIn, UINT msg, WPARAM wParam, LPARAM lPa
 	switch (msg) {
 	case WM_USER:
 		if (wParam==0 && lParam==WM_LBUTTONUP) {
-			if (IsWindowVisible(hDlg))
+			if (IsWindowVisible(hDlg)) {
 				ShowWindow(hDlg, SW_HIDE);
-			else
+			} else {
+				SetForegroundWindow(hDlg);
 				ShowWindow(hDlg, SW_SHOWNORMAL);
+			}
 		}
 		if (wParam==0 && lParam==WM_RBUTTONUP) {
 			HMENU menu=CreatePopupMenu();
@@ -752,17 +749,8 @@ int winCreate(void)
 	InitializeCriticalSection(&csCfg);
 	wmiscInit();
 	logicalDrives=GetLogicalDrives();
-	if (CreateThread(NULL, 0, guiThread, NULL, 0, NULL)) {
+	if (CreateThread(NULL, 0, guiThread, NULL, 0, NULL))
 		WaitForSingleObject(hSem, INFINITE);
-		if (!dokanDllPresent())
-			MessageBoxA(
-				hDlg,
-				"It seems that the DOKANY system driver is not present.\n"
-				"This program requires the DOKANY driver to operate.",
-				"Warning",
-				MB_OK
-			);
-	}
 	created=(hDlg!=NULL);
 	return created ? 0 : -1;
 }

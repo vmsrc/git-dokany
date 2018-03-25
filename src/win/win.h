@@ -1,5 +1,3 @@
-int dokanDllPresent(void);
-
 int winCreate(void);
 
 enum winCmd

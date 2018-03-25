@@ -13,5 +13,6 @@
 
 // TODO compareexchange, etc
 int v_atomic_add(v_aligned_int_t volatile *i, int v);
+int v_atomic_compare_exchange(v_aligned_int_t volatile *i, int cmp, int v);
 
 #endif // _V_ATOMIC_H_
